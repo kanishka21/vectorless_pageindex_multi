@@ -1,7 +1,5 @@
 import os
 import json
-import base64
-import fitz  # PyMuPDF
 from openai import OpenAI
 
 # ----------------------------
@@ -16,72 +14,62 @@ MODEL = "gpt-4o-mini"
 
 
 # ----------------------------
-# EXTRACT TEXT + IMAGES
+# LOAD CORPUS
 # ----------------------------
-def extract_pdf_multimodal(pdf_path):
-    doc = fitz.open(pdf_path)
-    full_text = ""
+def load_corpus():
+    docs = []
 
-    for page_num, page in enumerate(doc):
-        text = page.get_text()
-        full_text += f"\n--- Page {page_num} ---\n{text}\n"
+    for file in os.listdir("corpus"):
+        if file.endswith(".json"):
+            with open(f"corpus/{file}") as f:
+                docs.append(json.load(f))
 
-        images = page.get_images(full=True)
-
-        for img_index, img in enumerate(images):
-            xref = img[0]
-            base_image = doc.extract_image(xref)
-            image_bytes = base_image["image"]
-
-            # Skip tiny images (icons/logos)
-            if len(image_bytes) < 5000:
-                continue
-
-            b64 = base64.b64encode(image_bytes).decode()
-
-            response = client.chat.completions.create(
-                model=MODEL,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": "Describe this image in detail. Extract tables, numbers, and insights."},
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": f"data:image/png;base64,{b64}"}
-                            }
-                        ]
-                    }
-                ]
-            )
-
-            image_text = response.choices[0].message.content
-
-            full_text += f"\n[Image {img_index} Page {page_num}]\n{image_text}\n"
-
-    return full_text
+    return docs
 
 
 # ----------------------------
-# BUILD TOC (LLM)
+# NODE STRUCTURE
 # ----------------------------
-def build_toc(text):
+class Node:
+    def __init__(self, title, summary, text, source):
+        self.title = title
+        self.summary = summary
+        self.text = text
+        self.source = source
+        self.children = []
+
+
+def build_nodes(doc):
+    nodes = []
+
+    for sec in doc["toc"]:
+        node = Node(sec["title"], sec["summary"], doc["text"], doc["source"])
+
+        for sub in sec.get("subsections", []):
+            child = Node(sub["title"], sub["summary"], doc["text"], doc["source"])
+            node.children.append(child)
+
+        nodes.append(node)
+
+    return nodes
+
+
+# ----------------------------
+# LLM NODE SELECTION
+# ----------------------------
+def select_node(query, nodes):
+    options = "\n".join([
+        f"{i}. {n.title} - {n.summary}"
+        for i, n in enumerate(nodes)
+    ])
+
     prompt = f"""
-Create a structured table of contents.
+Query: {query}
 
-Return JSON:
-[
-  {{
-    "title": "...",
-    "summary": "...",
-    "subsections": [
-      {{"title": "...", "summary": "..."}}
-    ]
-  }}
-]
+Pick best section index.
 
-Document:
-{text[:15000]}
+Options:
+{options}
 """
 
     res = client.chat.completions.create(
@@ -90,45 +78,82 @@ Document:
         temperature=0
     )
 
-    content = res.choices[0].message.content.strip()
-
     try:
-        return json.loads(content)
+        return int(res.choices[0].message.content.strip())
     except:
-        return json.loads(content.replace("```json", "").replace("```", ""))
+        return 0
 
 
 # ----------------------------
-# SAVE CORPUS
+# TREE SEARCH (REASONING)
 # ----------------------------
-def save_corpus(pdf_path):
-    os.makedirs("corpus", exist_ok=True)
+def search_tree(query, nodes):
+    path = []
+    current = nodes
 
-    print(f"Processing {pdf_path}...")
+    while True:
+        idx = select_node(query, current)
+        node = current[idx]
 
-    text = extract_pdf_multimodal(pdf_path)
-    toc = build_toc(text)
+        path.append(node)
 
-    data = {
-        "source": os.path.basename(pdf_path),
-        "text": text,
-        "toc": toc
-    }
+        if not node.children:
+            return node, path
 
-    name = os.path.splitext(os.path.basename(pdf_path))[0]
-    out = f"corpus/{name}.json"
+        current = node.children
 
-    with open(out, "w") as f:
-        json.dump(data, f, indent=2)
 
-    print(f"Saved: {out}")
+# ----------------------------
+# ANSWER GENERATION
+# ----------------------------
+def generate_answer(query, node, path):
+    path_text = "\n".join([n.title for n in path])
+
+    prompt = f"""
+Answer using document.
+
+Query: {query}
+
+Path:
+{path_text}
+
+Content:
+{node.text[:4000]}
+
+Give a precise answer with references.
+"""
+
+    res = client.chat.completions.create(
+        model=MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2
+    )
+
+    return res.choices[0].message.content
 
 
 # ----------------------------
 # RUN
 # ----------------------------
 if __name__ == "__main__":
-    pdfs = [f"pdfs/{f}" for f in os.listdir("pdfs") if f.endswith(".pdf")]
+    docs = load_corpus()
 
-    for pdf in pdfs:
-        save_corpus(pdf)
+    all_nodes = []
+    for d in docs:
+        all_nodes.extend(build_nodes(d))
+
+    while True:
+        q = input("\nAsk (or exit): ")
+
+        if q.lower() == "exit":
+            break
+
+        node, path = search_tree(q, all_nodes)
+        ans = generate_answer(q, node, path)
+
+        print("\n--- Path ---")
+        for p in path:
+            print("-", p.title)
+
+        print("\n--- Answer ---")
+        print(ans)
