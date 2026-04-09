@@ -1,6 +1,5 @@
 import os
 import json
-from pypdf import PdfReader
 from openai import OpenAI
 
 client = OpenAI(
@@ -11,35 +10,63 @@ client = OpenAI(
 MODEL = "gpt-4o-mini"
 
 
-def load_pdf(path):
-    reader = PdfReader(path)
-    text = ""
+# ----------------------------
+# LOAD ALL CORPUS FILES
+# ----------------------------
+def load_corpus(folder="corpus"):
+    docs = []
 
-    for page in reader.pages:
-        t = page.extract_text()
-        if t:
-            text += t + "\n"
+    for file in os.listdir(folder):
+        if file.endswith(".json"):
+            with open(os.path.join(folder, file)) as f:
+                docs.append(json.load(f))
 
-    return text
+    return docs
 
 
-def build_toc(text):
+# ----------------------------
+# NODE CLASS
+# ----------------------------
+class Node:
+    def __init__(self, title, summary, text, source):
+        self.title = title
+        self.summary = summary
+        self.text = text
+        self.source = source
+        self.children = []
+
+
+def build_nodes(doc):
+    nodes = []
+
+    for sec in doc["toc"]:
+        node = Node(sec["title"], sec["summary"], doc["text"], doc["source"])
+
+        for sub in sec.get("subsections", []):
+            child = Node(sub["title"], sub["summary"], doc["text"], doc["source"])
+            node.children.append(child)
+
+        nodes.append(node)
+
+    return nodes
+
+
+# ----------------------------
+# LLM SELECT
+# ----------------------------
+def select_node(query, nodes):
+    options = "\n".join([
+        f"{i}. {n.title} - {n.summary}"
+        for i, n in enumerate(nodes)
+    ])
+
     prompt = f"""
-Extract a structured table of contents.
+Query: {query}
 
-Return JSON:
-[
-  {{
-    "title": "...",
-    "summary": "...",
-    "subsections": [
-      {{"title": "...", "summary": "..."}}
-    ]
-  }}
-]
+Pick best section index.
 
-Document:
-{text[:15000]}
+Options:
+{options}
 """
 
     res = client.chat.completions.create(
@@ -48,37 +75,79 @@ Document:
         temperature=0
     )
 
-    content = res.choices[0].message.content.strip()
-
     try:
-        return json.loads(content)
+        return int(res.choices[0].message.content.strip())
     except:
-        return json.loads(content.replace("```json", "").replace("```", ""))
+        return 0
 
 
-def save_corpus(pdf_path, output_dir="corpus"):
-    os.makedirs(output_dir, exist_ok=True)
+# ----------------------------
+# TREE SEARCH
+# ----------------------------
+def search_tree(query, nodes):
+    path = []
+    current = nodes
 
-    text = load_pdf(pdf_path)
-    toc = build_toc(text)
+    while True:
+        idx = select_node(query, current)
+        node = current[idx]
 
-    data = {
-        "source": os.path.basename(pdf_path),
-        "text": text,
-        "toc": toc
-    }
+        path.append(node)
 
-    name = os.path.splitext(os.path.basename(pdf_path))[0]
-    out_path = f"{output_dir}/{name}.json"
+        if not node.children:
+            return node, path
 
-    with open(out_path, "w") as f:
-        json.dump(data, f, indent=2)
-
-    print(f"Saved: {out_path}")
+        current = node.children
 
 
+# ----------------------------
+# FINAL ANSWER
+# ----------------------------
+def answer(query, node, path):
+    path_text = "\n".join([n.title for n in path])
+
+    prompt = f"""
+Answer using document.
+
+Query: {query}
+
+Path:
+{path_text}
+
+Content:
+{node.text[:4000]}
+"""
+
+    res = client.chat.completions.create(
+        model=MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2
+    )
+
+    return res.choices[0].message.content
+
+
+# ----------------------------
+# MAIN QUERY LOOP
+# ----------------------------
 if __name__ == "__main__":
-    pdfs = ["pdfs/file1.pdf", "pdfs/file2.pdf"]
+    docs = load_corpus()
 
-    for pdf in pdfs:
-        save_corpus(pdf)
+    all_nodes = []
+    for d in docs:
+        all_nodes.extend(build_nodes(d))
+
+    while True:
+        q = input("Ask: ")
+
+        if q == "exit":
+            break
+
+        node, path = search_tree(q, all_nodes)
+        ans = answer(q, node, path)
+
+        print("\nPath:")
+        for p in path:
+            print("-", p.title)
+
+        print("\nAnswer:\n", ans)
