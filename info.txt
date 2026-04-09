@@ -1,0 +1,46 @@
+
+##base versuib 
+PDFs (text + images)
+        ↓
+Multimodal Extraction (text + vision)
+        ↓
+TOC Tree (LLM)
+        ↓
+Corpus JSON (cached)
+        ↓
+Query
+        ↓
+Tree Traversal (LLM reasoning)
+        ↓
+Answer
+
+
+##Hybrid
+
+Query
+ ↓
+BM25 (fast keyword filter)
+ ↓
+Top-K candidate sections
+ ↓
+LLM Tree Traversal (only on filtered nodes)
+ ↓
+Best node
+ ↓
+LLM Answer
+
+
+
+###hybrid+tree code
+
+Query
+ ↓
+BM25 → shortlist top sections (fast)
+ ↓
+LLM → pick best section
+ ↓
+LLM → traverse children (tree reasoning)
+ ↓
+Final node
+ ↓
+LLM → answer
